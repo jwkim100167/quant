@@ -1,0 +1,173 @@
+/* Layout */
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+
+/* Nav */
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  padding: 0 24px;
+  height: 52px;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.nav-brand {
+  font-size: 16px;
+  font-weight: 700;
+  color: #e6edf3;
+  white-space: nowrap;
+}
+
+.nav-links {
+  display: flex;
+  gap: 4px;
+}
+
+.nav-links a {
+  padding: 6px 14px;
+  border-radius: 6px;
+  color: #8b949e;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+  transition: color 0.15s, background 0.15s;
+}
+
+.nav-links a:hover { color: #e6edf3; background: #21262d; }
+.nav-links a.active { color: #e6edf3; background: #21262d; }
+
+/* Main */
+.main { flex: 1; padding: 28px 24px; max-width: 1200px; width: 100%; margin: 0 auto; }
+
+/* Page header */
+.page-header { margin-bottom: 24px; }
+.page-title { font-size: 20px; font-weight: 600; color: #e6edf3; }
+.page-sub { font-size: 13px; color: #8b949e; margin-top: 4px; }
+
+/* Cards */
+.card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 20px;
+}
+
+.card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 16px;
+}
+
+/* Grid layouts */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+
+/* Table */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #8b949e;
+  border-bottom: 1px solid #30363d;
+  white-space: nowrap;
+}
+td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #21262d;
+  color: #e6edf3;
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: #1c2128; }
+
+/* Sector badge */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Period / filter buttons */
+.btn-group { display: flex; gap: 4px; flex-wrap: wrap; }
+.btn {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid #30363d;
+  background: transparent;
+  color: #8b949e;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn:hover { border-color: #8b949e; color: #e6edf3; }
+.btn.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+/* Loading / empty */
+.loading { color: #8b949e; padding: 40px; text-align: center; }
+.empty { color: #8b949e; padding: 20px; text-align: center; font-size: 13px; }
+
+/* Stat cards */
+.stat-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 16px 20px;
+}
+.stat-label { font-size: 12px; color: #8b949e; margin-bottom: 6px; }
+.stat-value { font-size: 28px; font-weight: 700; color: #e6edf3; }
+.stat-sub { font-size: 12px; color: #8b949e; margin-top: 4px; }
+
+/* Bar (custom inline bar) */
+.bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.bar-label { width: 72px; text-align: right; font-size: 12px; color: #8b949e; flex-shrink: 0; }
+.bar-track { flex: 1; background: #21262d; border-radius: 3px; height: 20px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s ease; }
+.bar-count { width: 40px; font-size: 12px; color: #e6edf3; flex-shrink: 0; }
+
+/* Filters row */
+.filters { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+.filters label { font-size: 13px; color: #8b949e; }
+select {
+  background: #161b22;
+  border: 1px solid #30363d;
+  color: #e6edf3;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* Rank number */
+.rank { font-size: 13px; color: #8b949e; font-weight: 600; }
+.rank-1 { color: #f59e0b; }
+.rank-2 { color: #9ca3af; }
+.rank-3 { color: #b45309; }
+
+/* Source dots */
+.source-bar { display: flex; gap: 3px; align-items: center; }
+.source-dot { width: 8px; height: 8px; border-radius: 50%; }
+
+/* Sector toggle chips */
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 20px; }
+.chip {
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 2px solid transparent;
+  opacity: 0.45;
+  transition: opacity 0.15s;
+}
+.chip.on { opacity: 1; }
