@@ -4,7 +4,7 @@ import {
   ResponsiveContainer, CartesianGrid,
 } from 'recharts'
 import { supabase } from '../lib/supabase'
-import { SECTOR_COLORS, SECTOR_LABELS, type WeeklyTrendRow } from '../types'
+import { SECTOR_COLORS, SECTOR_LABELS } from '../types'
 
 interface ChartRow {
   week: string
@@ -25,7 +25,7 @@ export default function Trend() {
 
       const { data } = await supabase
         .from('weekly_sector_stats')
-        .select('week_start, sector_id, mention_count')
+        .select('week_start, sector_id, mention_count, community_count')
         .gte('week_start', fromStr)
         .order('week_start')
 
@@ -35,10 +35,11 @@ export default function Trend() {
       const weekMap: Record<string, Record<string, number>> = {}
       const sectorTotals: Record<string, number> = {}
 
-      ;(data as WeeklyTrendRow[]).forEach(row => {
+      ;(data as { week_start: string; sector_id: string; mention_count: number; community_count: number }[]).forEach(row => {
         if (!weekMap[row.week_start]) weekMap[row.week_start] = {}
-        weekMap[row.week_start][row.sector_id] = row.mention_count
-        sectorTotals[row.sector_id] = (sectorTotals[row.sector_id] ?? 0) + row.mention_count
+        const cnt = (row.mention_count ?? 0) - (row.community_count ?? 0)
+        weekMap[row.week_start][row.sector_id] = cnt
+        sectorTotals[row.sector_id] = (sectorTotals[row.sector_id] ?? 0) + cnt
       })
 
       // 총량 상위 8개 섹터를 기본 ON

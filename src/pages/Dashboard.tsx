@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
+import { useNavigate } from 'react-router-dom'
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Legend } from 'recharts'
 import { supabase } from '../lib/supabase'
 import { SECTOR_COLORS, SECTOR_LABELS, type SectorStat } from '../types'
 
@@ -7,15 +8,25 @@ interface SectorRow extends SectorStat {
   delta: number | null
 }
 
+interface ChartRow {
+  week: string
+  [sector: string]: string | number
+}
+
 const SOURCE_COLORS = ['#3B82F6', '#10B981', '#F59E0B']
 
 export default function Dashboard() {
+  const navigate = useNavigate()
   const [rows, setRows]           = useState<SectorRow[]>([])
   const [weekStart, setWeekStart] = useState('')
   const [prevWeek, setPrevWeek]   = useState('')
   const [sourceData, setSourceData] = useState<{ name: string; value: number }[]>([])
   const [totalMentions, setTotalMentions] = useState(0)
   const [loading, setLoading]     = useState(true)
+  const [chartData, setChartData]       = useState<ChartRow[]>([])
+  const [allSectors, setAllSectors]     = useState<string[]>([])
+  const [activeSectors, setActiveSectors] = useState<Set<string>>(new Set())
+  const [trendWeeks, setTrendWeeks]       = useState(52)
 
   useEffect(() => {
     async function load() {
@@ -28,7 +39,19 @@ export default function Dashboard() {
 
       if (!weeksRaw || weeksRaw.length === 0) { setLoading(false); return }
 
-      const distinctWeeks = [...new Set(weeksRaw.map(r => r.week_start as string))].slice(0, 2)
+      // 이번 주(월요일) 시작일 계산 — 현재 진행 중인 불완전한 주는 제외
+      const now = new Date()
+      const daysToMonday = (now.getDay() + 6) % 7   // 0=Mon ... 6=Sun
+      const thisMonday = new Date(now)
+      thisMonday.setDate(now.getDate() - daysToMonday)
+      thisMonday.setHours(0, 0, 0, 0)
+      const thisMondayStr = thisMonday.toISOString().slice(0, 10)
+
+      // 완성된 주만 사용 (이번 주 week_start 제외)
+      const distinctWeeks = [...new Set(weeksRaw.map(r => r.week_start as string))]
+        .filter(w => w < thisMondayStr)
+        .sort()
+        .reverse()
       const cur  = distinctWeeks[0]
       const prev = distinctWeeks[1]
       setWeekStart(cur)
@@ -37,15 +60,16 @@ export default function Dashboard() {
       // 이번 주 + 전주 섹터 통계 한 번에 조회
       const { data: stats } = await supabase
         .from('weekly_sector_stats')
-        .select('week_start, sector_id, mention_count, rank')
+        .select('week_start, sector_id, mention_count, community_count, rank')
         .in('week_start', prev ? [cur, prev] : [cur])
 
       const curMap: Record<string, SectorStat> = {}
       const prevMap: Record<string, number>    = {}
 
       stats?.forEach(r => {
-        if (r.week_start === cur)  curMap[r.sector_id]  = r as unknown as SectorStat
-        if (r.week_start === prev) prevMap[r.sector_id] = r.mention_count
+        const cnt = (r.mention_count as number) - ((r.community_count as number) ?? 0)
+        if (r.week_start === cur)  curMap[r.sector_id]  = { ...r, mention_count: cnt } as unknown as SectorStat
+        if (r.week_start === prev) prevMap[r.sector_id] = cnt
       })
 
       const combined: SectorRow[] = Object.values(curMap).map(r => ({
@@ -64,6 +88,8 @@ export default function Dashboard() {
       const { data: mentions } = await supabase
         .from('raw_mentions')
         .select('source')
+        .neq('source', 'dart')
+        .neq('source', 'community')
         .gte('mentioned_at', cur)
 
       if (mentions) {
@@ -81,6 +107,52 @@ export default function Dashboard() {
     load()
   }, [])
 
+  useEffect(() => {
+    async function loadTrend() {
+      const from = new Date()
+      from.setDate(from.getDate() - trendWeeks * 7)
+      const fromStr = from.toISOString().split('T')[0]
+      const { data } = await supabase
+        .from('weekly_sector_stats')
+        .select('week_start, sector_id, mention_count, community_count')
+        .gte('week_start', fromStr)
+        .order('week_start')
+      if (!data || data.length === 0) return
+      const weekMap: Record<string, Record<string, number>> = {}
+      const sectorTotals: Record<string, number> = {}
+      ;(data as { week_start: string; sector_id: string; mention_count: number; community_count: number }[]).forEach(row => {
+        if (!weekMap[row.week_start]) weekMap[row.week_start] = {}
+        const cnt = row.mention_count - (row.community_count ?? 0)
+        weekMap[row.week_start][row.sector_id] = cnt
+        sectorTotals[row.sector_id] = (sectorTotals[row.sector_id] ?? 0) + cnt
+      })
+      const sorted = Object.keys(sectorTotals).sort((a, b) => sectorTotals[b] - sectorTotals[a])
+      setAllSectors(sorted)
+      setChartData(
+        Object.entries(weekMap).sort(([a], [b]) => a.localeCompare(b))
+          .map(([week, sectors]) => ({ week: week.slice(5).replace('-', '/'), ...sectors }))
+      )
+    }
+    loadTrend()
+  }, [trendWeeks])
+
+  useEffect(() => {
+    if (rows.length === 0 || allSectors.length === 0) return
+    const top8 = rows
+      .filter(r => r.sector_id !== 'ETC' && allSectors.includes(r.sector_id))
+      .slice(0, 8)
+      .map(r => r.sector_id)
+    setActiveSectors(new Set(top8))
+  }, [rows, allSectors])
+
+  function toggleSector(s: string) {
+    setActiveSectors(prev => {
+      const next = new Set(prev)
+      next.has(s) ? next.delete(s) : next.add(s)
+      return next
+    })
+  }
+
   const maxCount = rows[0]?.mention_count ?? 1
 
   if (loading) return <div className="loading">데이터 불러오는 중...</div>
@@ -90,47 +162,86 @@ export default function Dashboard() {
       <div className="page-header">
         <div className="page-title">섹터 대시보드</div>
         <div className="page-sub">
-          기준 주: {weekStart}&nbsp;·&nbsp;총 {totalMentions.toLocaleString()}건
-          {prevWeek && <>&nbsp;·&nbsp;전주 대비 변화 표시</>}
+          {(() => {
+            if (!weekStart) return null
+            const end = new Date(new Date(weekStart).getTime() + 6 * 86400000)
+            const endStr = `${String(end.getMonth() + 1).padStart(2, '0')}-${String(end.getDate()).padStart(2, '0')}`
+            const isLastWeek = (() => {
+              const now = new Date()
+              const todayMonday = new Date(now)
+              todayMonday.setDate(now.getDate() - ((now.getDay() + 6) % 7))
+              todayMonday.setHours(0, 0, 0, 0)
+              return new Date(weekStart) < todayMonday
+            })()
+            return <>
+              <span style={{ fontWeight: 600, color: isLastWeek ? '#f59e0b' : '#3fb950' }}>
+                {isLastWeek ? '저번주' : '이번주'}
+              </span>
+              &nbsp;{weekStart.slice(5)} ~ {endStr}
+              &nbsp;·&nbsp;총 {totalMentions.toLocaleString()}건
+              {prevWeek && <>&nbsp;·&nbsp;전주 대비 변화 표시</>}
+            </>
+          })()}
         </div>
       </div>
 
       <div className="grid-2" style={{ marginBottom: 16 }}>
-        {/* 섹터 랭킹 바 차트 */}
+        {/* 섹터 언급량 순위 (바 + 수치 통합) */}
         <div className="card">
           <div className="card-title">섹터별 언급량 순위</div>
           {rows.length === 0 ? (
             <div className="empty">집계 데이터 없음 (aggregate 실행 필요)</div>
           ) : (
-            <>
-              {rows.filter(r => r.sector_id !== 'ETC').map(r => {
-                const color = SECTOR_COLORS[r.sector_id] ?? '#6b7280'
-                const label = SECTOR_LABELS[r.sector_id] ?? r.sector_id
-                const pct   = (r.mention_count / maxCount) * 100
-                return (
-                  <div className="bar-row" key={r.sector_id}>
-                    <div className="bar-label" style={{ fontSize: 11 }}>{label}</div>
-                    <div className="bar-track">
-                      <div className="bar-fill" style={{ width: `${pct}%`, background: color }} />
-                    </div>
-                    <div className="bar-count" style={{ display: 'flex', alignItems: 'center', gap: 4, width: 70 }}>
-                      <span style={{ fontWeight: 600 }}>{r.mention_count}</span>
-                      {r.delta !== null && r.delta !== 0 && (
-                        <span style={{ fontSize: 11, color: r.delta > 0 ? '#10B981' : '#EF4444' }}>
-                          {r.delta > 0 ? `+${r.delta}` : r.delta}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-              {rows.find(r => r.sector_id === 'ETC') && (
-                <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #21262d', display: 'flex', justifyContent: 'space-between', color: '#8b949e', fontSize: 12 }}>
-                  <span>기타 (분류 미정)</span>
-                  <span style={{ fontWeight: 600 }}>{rows.find(r => r.sector_id === 'ETC')!.mention_count}건</span>
-                </div>
-              )}
-            </>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ color: '#8b949e', borderBottom: '1px solid #21262d' }}>
+                  <th style={{ width: 28, textAlign: 'center', paddingBottom: 6 }}>#</th>
+                  <th style={{ textAlign: 'left', paddingBottom: 6 }}>섹터</th>
+                  <th style={{ paddingBottom: 6 }}></th>
+                  <th style={{ textAlign: 'right', paddingBottom: 6 }}>언급량</th>
+                  <th style={{ textAlign: 'right', paddingBottom: 6 }}>전주대비</th>
+                  <th style={{ textAlign: 'right', paddingBottom: 6 }}>비율</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.filter(r => r.sector_id !== 'ETC').map((r, i) => {
+                  const color = SECTOR_COLORS[r.sector_id] ?? '#6b7280'
+                  const label = SECTOR_LABELS[r.sector_id] ?? r.sector_id
+                  const barPct = (r.mention_count / maxCount) * 100
+                  const sharePct = totalMentions > 0 ? ((r.mention_count / totalMentions) * 100).toFixed(1) : '0'
+                  return (
+                    <tr key={r.sector_id} onClick={() => navigate(`/sector?sector=${r.sector_id}`)}
+                      style={{ cursor: 'pointer', borderBottom: '1px solid #21262d' }}
+                      onMouseEnter={e => (e.currentTarget.style.background = '#161b22')}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                    >
+                      <td style={{ textAlign: 'center', padding: '5px 0', color: i < 3 ? ['#FFD700','#C0C0C0','#CD7F32'][i] : '#8b949e', fontWeight: 700 }}>{i + 1}</td>
+                      <td style={{ padding: '5px 6px' }}>
+                        <span style={{ background: `${color}22`, color, borderRadius: 4, padding: '2px 6px', fontSize: 11 }}>{label}</span>
+                      </td>
+                      <td style={{ width: '30%', padding: '5px 8px' }}>
+                        <div style={{ background: '#21262d', borderRadius: 3, height: 6, overflow: 'hidden' }}>
+                          <div style={{ width: `${barPct}%`, height: '100%', background: color, borderRadius: 3 }} />
+                        </div>
+                      </td>
+                      <td style={{ textAlign: 'right', fontWeight: 700, color: '#58a6ff', padding: '5px 4px' }}>{r.mention_count}</td>
+                      <td style={{ textAlign: 'right', fontWeight: 600, padding: '5px 4px',
+                        color: r.delta == null ? '#8b949e' : r.delta > 0 ? '#10B981' : r.delta < 0 ? '#EF4444' : '#8b949e' }}>
+                        {r.delta == null ? '-' : r.delta > 0 ? `+${r.delta}` : r.delta === 0 ? '─' : r.delta}
+                      </td>
+                      <td style={{ textAlign: 'right', color: '#8b949e', padding: '5px 4px' }}>{sharePct}%</td>
+                    </tr>
+                  )
+                })}
+                {rows.find(r => r.sector_id === 'ETC') && (
+                  <tr style={{ color: '#8b949e' }}>
+                    <td colSpan={3} style={{ padding: '5px 6px', fontSize: 11 }}>기타 (분류 미정)</td>
+                    <td style={{ textAlign: 'right', padding: '5px 4px', fontWeight: 600 }}>{rows.find(r => r.sector_id === 'ETC')!.mention_count}</td>
+                    <td colSpan={2} />
+                  </tr>
+                )}
+              </tbody>
+            </table>
           )}
         </div>
 
@@ -183,55 +294,54 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* 전체 섹터 테이블 */}
-      <div className="card">
-        <div className="card-title">전체 섹터 순위표</div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th style={{ width: 48 }}>순위</th>
-                <th>섹터</th>
-                <th style={{ textAlign: 'right' }}>언급량</th>
-                <th style={{ textAlign: 'right' }}>전주 대비</th>
-                <th style={{ textAlign: 'right' }}>비율</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.filter(r => r.sector_id !== 'ETC').map((r, i) => {
-                const color = SECTOR_COLORS[r.sector_id] ?? '#6b7280'
-                const label = SECTOR_LABELS[r.sector_id] ?? r.sector_id
-                const pct = totalMentions > 0 ? ((r.mention_count / totalMentions) * 100).toFixed(1) : '0'
-                return (
-                  <tr key={r.sector_id}>
-                    <td><span className={`rank${i < 3 ? ` rank-${i + 1}` : ''}`}>{i + 1}</span></td>
-                    <td>
-                      <span className="badge" style={{ background: `${color}22`, color }}>{label}</span>
-                    </td>
-                    <td style={{ textAlign: 'right', fontWeight: 700, color: '#58a6ff' }}>{r.mention_count}</td>
-                    <td style={{ textAlign: 'right', fontWeight: 600, color: r.delta === null ? '#8b949e' : r.delta > 0 ? '#10B981' : r.delta < 0 ? '#EF4444' : '#8b949e' }}>
-                      {r.delta === null ? '-' : r.delta > 0 ? `+${r.delta}` : r.delta === 0 ? '─' : r.delta}
-                    </td>
-                    <td style={{ textAlign: 'right', color: '#8b949e' }}>{pct}%</td>
-                  </tr>
-                )
-              })}
-              {rows.find(r => r.sector_id === 'ETC') && (() => {
-                const etc = rows.find(r => r.sector_id === 'ETC')!
-                const pct = totalMentions > 0 ? ((etc.mention_count / totalMentions) * 100).toFixed(1) : '0'
-                return (
-                  <tr key="ETC" style={{ opacity: 0.6 }}>
-                    <td><span className="rank">-</span></td>
-                    <td><span className="badge" style={{ background: '#4B556322', color: '#4B5563' }}>기타</span></td>
-                    <td style={{ textAlign: 'right', fontWeight: 700, color: '#58a6ff' }}>{etc.mention_count}</td>
-                    <td style={{ textAlign: 'right', color: '#8b949e' }}>-</td>
-                    <td style={{ textAlign: 'right', color: '#8b949e' }}>{pct}%</td>
-                  </tr>
-                )
-              })()}
-            </tbody>
-          </table>
+      {/* 주간 트렌드 */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div className="card-title" style={{ marginBottom: 0 }}>주간 트렌드 <span style={{ fontSize: 12, color: '#8b949e', fontWeight: 400 }}>섹터별 언급량 추이</span></div>
+          <div className="btn-group">
+            {([{ w: 13, label: '3개월' }, { w: 26, label: '6개월' }, { w: 52, label: '1년' }] as { w: number; label: string }[]).map(({ w, label }) => (
+              <button key={w} className={`btn${trendWeeks === w ? ' active' : ''}`} onClick={() => setTrendWeeks(w)}>{label}</button>
+            ))}
+          </div>
         </div>
+        <div className="chips" style={{ marginBottom: 16 }}>
+          {[...allSectors].sort((a, b) => {
+            const ra = rows.findIndex(r => r.sector_id === a)
+            const rb = rows.findIndex(r => r.sector_id === b)
+            return (ra === -1 ? 999 : ra) - (rb === -1 ? 999 : rb)
+          }).map(s => {
+            const color = SECTOR_COLORS[s] ?? '#6b7280'
+            const on = activeSectors.has(s)
+            return (
+              <button key={s} className={`chip${on ? ' on' : ''}`}
+                style={{ background: on ? `${color}22` : 'transparent', color: on ? color : '#6b7280', borderColor: on ? color : '#30363d' }}
+                onClick={() => toggleSector(s)}>
+                {SECTOR_LABELS[s] ?? s}
+              </button>
+            )
+          })}
+        </div>
+        {chartData.length === 0 ? (
+          <div className="empty">트렌드 데이터 없음</div>
+        ) : (
+          <ResponsiveContainer width="100%" height={360}>
+            <LineChart data={chartData} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+              <XAxis dataKey="week" tick={{ fill: '#8b949e', fontSize: 11 }} axisLine={{ stroke: '#30363d' }} tickLine={false} />
+              <YAxis tick={{ fill: '#8b949e', fontSize: 11 }} axisLine={false} tickLine={false} width={36} />
+              <Tooltip
+                contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 6, color: '#e6edf3', fontSize: 12 }}
+                labelStyle={{ color: '#8b949e', marginBottom: 4 }}
+                formatter={(value, name) => [`${value}건`, SECTOR_LABELS[String(name)] ?? String(name)]}
+              />
+              <Legend formatter={(v: string) => <span style={{ color: '#8b949e', fontSize: 12 }}>{SECTOR_LABELS[v] ?? v}</span>} />
+              {allSectors.filter(s => activeSectors.has(s)).map(s => (
+                <Line key={s} type="monotone" dataKey={s} stroke={SECTOR_COLORS[s] ?? '#6b7280'}
+                  strokeWidth={2} dot={false} activeDot={{ r: 4 }} connectNulls />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        )}
       </div>
     </div>
   )
