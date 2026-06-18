@@ -1209,9 +1209,10 @@ export default function Backtest() {
                             cursor={{ fill: '#ffffff08' }}
                             contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 6, fontSize: 12 }}
                             labelStyle={{ color: '#6b7280' }}
-                            formatter={(value: number, _: string, entry: { payload: { dir: string } }) => {
-                              const arrow = entry.payload.dir === 'up' ? '▲' : entry.payload.dir === 'down' ? '▼' : '─'
-                              return [`${value}건 ${arrow}`, '언급량']
+                            formatter={(value, _name, entry) => {
+                              const dir = (entry as { payload: { dir: string } }).payload.dir
+                              const arrow = dir === 'up' ? '▲' : dir === 'down' ? '▼' : '─'
+                              return [`${value ?? 0}건 ${arrow}`, '언급량']
                             }}
                           />
                           <Bar dataKey="count" radius={[3, 3, 0, 0]}>
