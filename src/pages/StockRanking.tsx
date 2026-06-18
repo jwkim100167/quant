@@ -40,6 +40,7 @@ export default function StockRanking() {
     supabase
       .from('raw_mentions')
       .select('ticker, source')
+      .neq('source', 'community')
       .gte('mentioned_at', fromStr)
       .then(({ data: mentions }) => {
         if (!mentions) { setLoading(false); return }

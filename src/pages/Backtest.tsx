@@ -2,12 +2,27 @@ import { useEffect, useState, useMemo, useCallback } from 'react'
 import {
   LineChart, Line, XAxis, YAxis, Tooltip,
   ResponsiveContainer, CartesianGrid, ReferenceLine, Legend,
+  BarChart, Bar, Cell,
 } from 'recharts'
 import { supabase } from '../lib/supabase'
 import {
   SECTOR_LABELS, SECTOR_COLORS,
-  type BacktestRow, type SectorReturn,
+  type BacktestRow, type SectorReturn, type Stock,
 } from '../types'
+
+type StockSimResult = {
+  sectorId: string
+  sectorLabel: string
+  weeklyMentions: number[]
+  weekDates: string[]
+  upWeeks: number
+  downWeeks: number
+  streak: number
+  ytdMultiplier: number
+  score: number
+  recommend: boolean
+  rollingWindow: number
+}
 
 const ROLLING_WINDOW_OPTIONS = [
   { label: '4주',        value: 4  },
@@ -59,6 +74,13 @@ export default function Backtest() {
   const [tradeScenario, setTradeScenario]     = useState<TradeScenario>('hybrid_optimal')
   const [hoveredScenario, setHoveredScenario] = useState<TradeScenario | null>(null)
   const [benchmarks, setBenchmarks] = useState<Record<string, { kospi200: number | null; kosdaq150: number | null }>>({})
+
+  const [stockQuery, setStockQuery]           = useState('')
+  const [stockResults, setStockResults]       = useState<Stock[]>([])
+  const [selectedStock, setSelectedStock]     = useState<Stock | null>(null)
+  const [searchLoading, setSearchLoading]     = useState(false)
+  const [stockSimResult, setStockSimResult]   = useState<StockSimResult | null>(null)
+  const [stockSimLoading, setStockSimLoading] = useState(false)
 
   useEffect(() => {
     async function load() {
@@ -544,6 +566,112 @@ export default function Backtest() {
     }, 50)
   }, [activeRows])
 
+  const searchStocks = useCallback(async (query: string) => {
+    if (query.trim().length < 1) { setStockResults([]); return }
+    setSearchLoading(true)
+    const { data } = await supabase
+      .from('stocks')
+      .select('ticker,name,sector_id')
+      .or(`name.ilike.%${query}%,ticker.ilike.%${query}%`)
+      .neq('sector_id', 'NASDAQ_TOP10')
+      .limit(10)
+    setStockResults((data as Stock[]) ?? [])
+    setSearchLoading(false)
+  }, [])
+
+  const runStockSim = useCallback(async () => {
+    if (!selectedStock) return
+    setStockSimLoading(true)
+    setStockSimResult(null)
+
+    // 1. 52주 언급량 집계
+    const now = new Date()
+    const from = new Date(now)
+    from.setDate(from.getDate() - 52 * 7)
+    const fromStr = from.toISOString().split('T')[0]
+
+    const { data: mentions } = await supabase
+      .from('raw_mentions')
+      .select('mentioned_at')
+      .eq('ticker', selectedStock.ticker)
+      .gte('mentioned_at', fromStr)
+
+    const weekMap: Record<string, number> = {}
+    mentions?.forEach(m => {
+      const d = new Date(m.mentioned_at)
+      const day = d.getDay()
+      const diff = day === 0 ? -6 : 1 - day
+      const mon = new Date(d)
+      mon.setDate(d.getDate() + diff)
+      const key = mon.toISOString().split('T')[0]
+      weekMap[key] = (weekMap[key] ?? 0) + 1
+    })
+
+    const weeks: string[] = []
+    for (let i = 51; i >= 0; i--) {
+      const d = new Date(now)
+      d.setDate(d.getDate() - i * 7)
+      const day = d.getDay()
+      const diff = day === 0 ? -6 : 1 - day
+      const mon = new Date(d)
+      mon.setDate(d.getDate() + diff)
+      weeks.push(mon.toISOString().split('T')[0])
+    }
+    const weeklyMentions = weeks.map(w => weekMap[w] ?? 0)
+
+    // 롤링 윈도우 기준으로 상승/하락/연속 계산
+    const rollingSlice = weeklyMentions.slice(-rollingWeeks)
+    const comparisons = rollingSlice.length - 1
+
+    let upWeeks = 0, downWeeks = 0
+    for (let i = 1; i < rollingSlice.length; i++) {
+      if (rollingSlice[i] > rollingSlice[i - 1]) upWeeks++
+      else if (rollingSlice[i] < rollingSlice[i - 1]) downWeeks++
+    }
+
+    let streak = 0
+    for (let i = rollingSlice.length - 1; i >= 1; i--) {
+      if (rollingSlice[i] > rollingSlice[i - 1]) {
+        if (streak >= 0) streak++
+        else break
+      } else if (rollingSlice[i] < rollingSlice[i - 1]) {
+        if (streak <= 0) streak--
+        else break
+      } else break
+    }
+
+    // 2. 연초 대비 섹터 수익률
+    const ytdStart = `${now.getFullYear()}-01-01`
+    const sectorRets = rawReturns.filter(
+      r => r.sector_id === selectedStock.sector_id && r.week_start >= ytdStart
+    )
+    const ytdMultiplier = sectorRets.reduce((acc, r) => acc * (1 + (r.return_pct ?? 0) / 100), 1)
+
+    // 3. 복합 점수 (롤링 윈도우 기준, ≥50% → +2, ≥40% → +1)
+    const upRate = comparisons > 0 ? upWeeks / comparisons : 0
+    let score = 0
+    if (upRate >= 1 / 2) score += 2
+    else if (upRate >= 2 / 5) score += 1
+    if (streak >= 3) score += 2
+    else if (streak >= 2) score += 1
+    if (ytdMultiplier >= 1.1) score += 1
+
+    setStockSimResult({
+      sectorId: selectedStock.sector_id,
+      sectorLabel: SECTOR_LABELS[selectedStock.sector_id] ?? selectedStock.sector_id,
+      weeklyMentions,
+      weekDates: weeks,
+      upWeeks,
+      downWeeks,
+      streak,
+      ytdMultiplier,
+      score,
+      recommend: score >= 3,
+      rollingWindow: rollingWeeks,
+    })
+    setStockSimLoading(false)
+  }, [selectedStock, rawReturns, rollingWeeks])
+
   if (loading) return <div className="loading">데이터 불러오는 중...</div>
 
   const green = '#3fb950', red = '#f85149', gray = '#8b949e'
@@ -887,6 +1015,292 @@ export default function Backtest() {
                   })}
                 </tbody>
               </table>
+            </div>
+          )
+        })()}
+      </div>
+
+      {/* 특정종목 시뮬레이션 */}
+      <div style={{ marginTop: 40, borderTop: '1px solid #21262d', paddingTop: 28 }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: '#e6edf3', marginBottom: 4 }}>특정종목 시뮬레이션</div>
+        <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 16 }}>
+          종목을 검색해 52주 언급량 트렌드와 섹터 수익률을 기반으로 추천 여부를 판단합니다.
+        </div>
+
+        {/* 검색창 */}
+        <div style={{ position: 'relative', maxWidth: 360 }}>
+          <input
+            type="text"
+            placeholder="종목명 또는 티커 검색 (예: 삼성전자, 005930)"
+            value={stockQuery}
+            onChange={e => {
+              setStockQuery(e.target.value)
+              searchStocks(e.target.value)
+            }}
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              padding: '8px 12px', borderRadius: 8, fontSize: 13,
+              border: '1px solid #30363d', background: '#0d1117', color: '#e6edf3',
+              outline: 'none',
+            }}
+          />
+          {searchLoading && (
+            <span style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', color: '#6b7280', fontSize: 11 }}>
+              검색 중...
+            </span>
+          )}
+          {stockResults.length > 0 && (
+            <div style={{
+              position: 'absolute', top: '110%', left: 0, right: 0, zIndex: 100,
+              background: '#161b22', border: '1px solid #30363d', borderRadius: 8,
+              overflow: 'hidden',
+            }}>
+              {stockResults.map(s => (
+                <div
+                  key={s.ticker}
+                  onClick={() => {
+                    setSelectedStock(s)
+                    setStockQuery(s.name)
+                    setStockResults([])
+                    setStockSimResult(null)
+                  }}
+                  style={{
+                    padding: '8px 14px', cursor: 'pointer', fontSize: 13,
+                    color: '#e6edf3', borderBottom: '1px solid #21262d',
+                    display: 'flex', gap: 10, alignItems: 'center',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = '#1c2128')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                >
+                  <span style={{ color: '#a78bfa', fontWeight: 600 }}>{s.ticker}</span>
+                  <span>{s.name}</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 11, color: '#6b7280' }}>
+                    {SECTOR_LABELS[s.sector_id] ?? s.sector_id}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 선택된 종목 + 실행 버튼 */}
+        {selectedStock && (
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 12 }}>
+            <span style={{
+              padding: '4px 12px', borderRadius: 20, background: '#1c2128',
+              border: '1px solid #30363d', fontSize: 12, color: '#c9d1d9',
+            }}>
+              {selectedStock.name} ({selectedStock.ticker}) · {SECTOR_LABELS[selectedStock.sector_id] ?? selectedStock.sector_id}
+            </span>
+            <button
+              onClick={runStockSim}
+              disabled={stockSimLoading}
+              style={{
+                padding: '6px 18px', borderRadius: 8, fontSize: 13, fontWeight: 600,
+                cursor: stockSimLoading ? 'not-allowed' : 'pointer',
+                border: '1px solid #a78bfa',
+                background: stockSimLoading ? '#1c2128' : '#a78bfa22',
+                color: stockSimLoading ? '#6b7280' : '#a78bfa',
+              }}
+            >
+              {stockSimLoading ? '분석 중...' : '시뮬레이션 실행'}
+            </button>
+          </div>
+        )}
+
+        {/* 결과 카드 */}
+        {stockSimResult && (() => {
+          const r = stockSimResult
+          const streakLabel = r.streak === 0
+            ? '보합'
+            : r.streak > 0
+              ? `${r.streak}주 연속 상승 중`
+              : `${Math.abs(r.streak)}주 연속 하락 중`
+          const streakColor = r.streak > 0 ? green : r.streak < 0 ? red : gray
+          const ytdPct = ((r.ytdMultiplier - 1) * 100).toFixed(1)
+          const ytdColor = r.ytdMultiplier >= 1 ? green : red
+          const comparisons = r.rollingWindow - 1
+          const upRate = comparisons > 0 ? r.upWeeks / comparisons : 0
+          const scoreItems = [
+            {
+              label: `상승 비율 ≥ 50% (${r.rollingWindow}주 롤링)`,
+              desc: `실제 ${(upRate * 100).toFixed(1)}% (${r.upWeeks}/${comparisons}번)`,
+              pts: upRate >= 1 / 2 ? 2 : 0,
+              max: 2,
+              met: upRate >= 1 / 2,
+            },
+            {
+              label: `상승 비율 ≥ 40% (${r.rollingWindow}주 롤링)`,
+              desc: `실제 ${(upRate * 100).toFixed(1)}% (${r.upWeeks}/${comparisons}번)`,
+              pts: upRate >= 2 / 5 && upRate < 1 / 2 ? 1 : 0,
+              max: 1,
+              met: upRate >= 2 / 5,
+            },
+            {
+              label: `연속 상승 ≥ 3주 (${r.rollingWindow}주 롤링)`,
+              desc: `실제 ${r.streak > 0 ? r.streak : 0}주 연속`,
+              pts: r.streak >= 3 ? 2 : 0,
+              max: 2,
+              met: r.streak >= 3,
+            },
+            {
+              label: `연속 상승 ≥ 2주 (${r.rollingWindow}주 롤링)`,
+              desc: `실제 ${r.streak > 0 ? r.streak : 0}주 연속`,
+              pts: r.streak >= 2 && r.streak < 3 ? 1 : 0,
+              max: 1,
+              met: r.streak >= 2,
+            },
+            {
+              label: '연초 대비 섹터 ≥ 1.10배',
+              desc: `실제 ${r.ytdMultiplier.toFixed(2)}배`,
+              pts: r.ytdMultiplier >= 1.1 ? 1 : 0,
+              max: 1,
+              met: r.ytdMultiplier >= 1.1,
+            },
+          ]
+          return (
+            <div style={{
+              marginTop: 20, borderRadius: 12,
+              border: '1px solid #21262d', background: '#0d1117',
+              display: 'flex', gap: 0,
+            }}>
+              {/* 좌: 차트 + 지표 + 결론 */}
+              <div style={{ flex: 1, padding: '20px 24px', minWidth: 0 }}>
+                {/* 헤더 */}
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: '#e6edf3' }}>
+                    {selectedStock!.name}
+                    <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 8 }}>({selectedStock!.ticker})</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#a78bfa', marginTop: 3 }}>
+                    섹터: {r.sectorLabel}
+                  </div>
+                </div>
+
+                {/* 52주 언급량 바 차트 */}
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <span style={{ fontSize: 12, color: '#6b7280' }}>52주 언급량 추이 (차트)</span>
+                    <span style={{ fontSize: 12 }}>
+                      <span style={{ color: '#6b7280', fontSize: 11 }}>{r.rollingWindow}주 롤링 기준 · </span>
+                      <span style={{ color: green }}>{r.upWeeks}주 상승</span>
+                      <span style={{ color: '#6b7280' }}> / </span>
+                      <span style={{ color: red }}>{r.downWeeks}주 하락</span>
+                      <span style={{ color: '#6b7280', marginLeft: 6 }}>· 연속: </span>
+                      <span style={{ color: streakColor, fontWeight: 600 }}>{streakLabel}</span>
+                    </span>
+                  </div>
+                  {(() => {
+                    const chartData = r.weeklyMentions.map((count, i) => {
+                      const prev = i === 0 ? count : r.weeklyMentions[i - 1]
+                      const dir = i === 0 ? 'flat' : count > prev ? 'up' : count < prev ? 'down' : 'flat'
+                      const label = r.weekDates[i].slice(5).replace('-', '/')
+                      return { label, count, dir }
+                    })
+                    const maxCount = Math.max(...chartData.map(d => d.count), 1)
+                    return (
+                      <ResponsiveContainer width="100%" height={130}>
+                        <BarChart data={chartData} margin={{ top: 4, right: 4, left: -24, bottom: 0 }}
+                          barCategoryGap="20%">
+                          <CartesianGrid vertical={false} stroke="#21262d" />
+                          <XAxis dataKey="label" tick={{ fontSize: 9, fill: '#6b7280' }} axisLine={false} tickLine={false} interval={7} />
+                          <YAxis tick={{ fontSize: 10, fill: '#6b7280' }} axisLine={false} tickLine={false} domain={[0, maxCount]} />
+                          <Tooltip
+                            cursor={{ fill: '#ffffff08' }}
+                            contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 6, fontSize: 12 }}
+                            labelStyle={{ color: '#6b7280' }}
+                            formatter={(value: number, _: string, entry: { payload: { dir: string } }) => {
+                              const arrow = entry.payload.dir === 'up' ? '▲' : entry.payload.dir === 'down' ? '▼' : '─'
+                              return [`${value}건 ${arrow}`, '언급량']
+                            }}
+                          />
+                          <Bar dataKey="count" radius={[3, 3, 0, 0]}>
+                            {chartData.map((d, i) => (
+                              <Cell
+                                key={i}
+                                fill={d.dir === 'up' ? '#3fb950' : d.dir === 'down' ? '#f85149' : '#4b5563'}
+                              />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    )
+                  })()}
+                </div>
+
+                {/* 지표 */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13, borderTop: '1px solid #21262d', paddingTop: 12 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: '#6b7280' }}>연초 대비 섹터 수익률</span>
+                    <span style={{ color: ytdColor, fontWeight: 600 }}>
+                      {r.ytdMultiplier.toFixed(2)}배 ({ytdPct}%)
+                    </span>
+                  </div>
+                </div>
+
+                {/* 결론 */}
+                <div style={{
+                  marginTop: 18, padding: '14px 18px', borderRadius: 10,
+                  background: r.recommend ? '#064e3b' : '#450a0a',
+                  border: `1px solid ${r.recommend ? '#34d399' : '#f87171'}`,
+                  display: 'flex', alignItems: 'center', gap: 10,
+                }}>
+                  <span style={{ fontSize: 22 }}>{r.recommend ? '✅' : '❌'}</span>
+                  <div>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: r.recommend ? green : red }}>
+                      {r.recommend ? '추천합니다' : '추천하지 않습니다'}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
+                      {r.recommend
+                        ? `복합 기준 3점 이상 충족 (${r.score}/5점)`
+                        : `복합 기준 3점 미달 (${r.score}/5점)`}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 우: 점수 선정기준 */}
+              <div style={{
+                width: 220, flexShrink: 0,
+                borderLeft: '1px solid #21262d',
+                padding: '20px 18px',
+                display: 'flex', flexDirection: 'column', gap: 0,
+              }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#6b7280', marginBottom: 12 }}>점수 선정기준</div>
+                {scoreItems.map((item, i) => (
+                  <div key={i} style={{
+                    padding: '8px 0',
+                    borderBottom: i < scoreItems.length - 1 ? '1px solid #161b22' : 'none',
+                    opacity: item.met ? 1 : 0.45,
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                      <span style={{ fontSize: 11, color: item.met ? '#e6edf3' : '#6b7280' }}>{item.label}</span>
+                      <span style={{
+                        fontSize: 11, fontWeight: 700,
+                        color: item.pts > 0 ? green : '#4b5563',
+                      }}>
+                        {item.pts > 0 ? `+${item.pts}점` : `0/${item.max}점`}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 10, color: '#6b7280' }}>{item.desc}</div>
+                  </div>
+                ))}
+                <div style={{
+                  marginTop: 14, paddingTop: 12, borderTop: '1px solid #21262d',
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                }}>
+                  <span style={{ fontSize: 12, color: '#6b7280' }}>합계</span>
+                  <span style={{
+                    fontSize: 14, fontWeight: 700,
+                    color: r.score >= 3 ? green : red,
+                  }}>
+                    {r.score} / 5점
+                  </span>
+                </div>
+                <div style={{ marginTop: 6, fontSize: 10, color: '#4b5563', textAlign: 'right' }}>
+                  3점 이상 → 추천
+                </div>
+              </div>
             </div>
           )
         })()}
