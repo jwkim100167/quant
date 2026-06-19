@@ -14,6 +14,7 @@ interface ChartRow {
 }
 
 const SOURCE_COLORS = ['#3B82F6', '#10B981', '#F59E0B']
+const US_SECTORS = ['NASDAQ_TOP10']
 
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -62,6 +63,7 @@ export default function Dashboard() {
         .from('weekly_sector_stats')
         .select('week_start, sector_id, mention_count, community_count, rank')
         .in('week_start', prev ? [cur, prev] : [cur])
+        .not('sector_id', 'in', `(${US_SECTORS.join(',')})`)
 
       const curMap: Record<string, SectorStat> = {}
       const prevMap: Record<string, number>    = {}
@@ -116,6 +118,7 @@ export default function Dashboard() {
         .from('weekly_sector_stats')
         .select('week_start, sector_id, mention_count, community_count')
         .gte('week_start', fromStr)
+        .not('sector_id', 'in', `(${US_SECTORS.join(',')})`)
         .order('week_start')
       if (!data || data.length === 0) return
       const weekMap: Record<string, Record<string, number>> = {}

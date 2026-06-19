@@ -2,31 +2,15 @@ import { useEffect, useState, useMemo, useCallback } from 'react'
 import {
   LineChart, Line, XAxis, YAxis, Tooltip,
   ResponsiveContainer, CartesianGrid, ReferenceLine, Legend,
-  BarChart, Bar, Cell,
 } from 'recharts'
 import { supabase } from '../lib/supabase'
 import {
   SECTOR_LABELS, SECTOR_COLORS,
-  type BacktestRow, type SectorReturn, type Stock,
+  type BacktestRow, type SectorReturn,
 } from '../types'
 
-type StockSimResult = {
-  sectorId: string
-  sectorLabel: string
-  weeklyMentions: number[]
-  weekDates: string[]
-  upWeeks: number
-  downWeeks: number
-  streak: number
-  ytdMultiplier: number
-  score: number
-  recommend: boolean
-  rollingWindow: number
-  mentionRank: number
-  mentionRankPrev: number
-  sectorPeerCount: number
-  rankSignal: boolean
-}
+const US_SECTORS = ['NASDAQ_TOP10']
+const US_TICKERS = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'COST', 'NFLX']
 
 const ROLLING_WINDOW_OPTIONS = [
   { label: '4주',        value: 4  },
@@ -35,7 +19,7 @@ const ROLLING_WINDOW_OPTIONS = [
   { label: '26주 (반기)', value: 26 },
 ]
 
-type TradeScenario = 'top1_track' | 'market_signal_3w' | 'market_signal_2w' | 'hybrid_optimal'
+type TradeScenario = 'top1_track' | 'market_signal_3w' | 'market_signal_2w' | 'hybrid_optimal' | 'rank_signal'
 const TRADE_SCENARIOS: { key: TradeScenario; label: string; desc: string }[] = [
   {
     key: 'hybrid_optimal',
@@ -57,6 +41,11 @@ const TRADE_SCENARIOS: { key: TradeScenario; label: string; desc: string }[] = [
     label: '시장전체 2주 하락→언급량1위',
     desc: '시장 전체 언급량 증가 시 언급량 1위 섹터 매수.\n2주 연속 시장 전체 감소 시 전량 매도 → 현금\n현금 중 시장 회복 시 언급량 1위 재매수',
   },
+  {
+    key: 'rank_signal',
+    label: '순위 상승 or Top3 진입',
+    desc: '개별 종목 언급 순위 기반 QQQ 매매.\n· Top3 종목 중 하나라도 순위가 올라가거나 언급량이 증가하면 매수\n· 신호 소멸 시 전량 매도 → 현금\n· 수익률 프록시: NASDAQ_TOP10 (QQQ)',
+  },
 ]
 
 type RawStat = {
@@ -69,7 +58,7 @@ type RawStat = {
 }
 type SourceFilter = 'all' | 'report' | 'community'
 
-export default function Backtest() {
+export default function USBacktest() {
   const [rawStats, setRawStats]     = useState<RawStat[]>([])
   const [rawReturns, setRawReturns] = useState<SectorReturn[]>([])
   const [loading, setLoading]       = useState(true)
@@ -78,13 +67,7 @@ export default function Backtest() {
   const [tradeScenario, setTradeScenario]     = useState<TradeScenario>('hybrid_optimal')
   const [hoveredScenario, setHoveredScenario] = useState<TradeScenario | null>(null)
   const [benchmarks, setBenchmarks] = useState<Record<string, { kospi200: number | null; kosdaq150: number | null }>>({})
-
-  const [stockQuery, setStockQuery]           = useState('')
-  const [stockResults, setStockResults]       = useState<Stock[]>([])
-  const [selectedStock, setSelectedStock]     = useState<Stock | null>(null)
-  const [searchLoading, setSearchLoading]     = useState(false)
-  const [stockSimResult, setStockSimResult]   = useState<StockSimResult | null>(null)
-  const [stockSimLoading, setStockSimLoading] = useState(false)
+  const [tickerWeekly, setTickerWeekly] = useState<Record<string, Record<string, number>>>({})
 
   useEffect(() => {
     async function load() {
@@ -96,6 +79,7 @@ export default function Backtest() {
         const { data } = await supabase
           .from('weekly_sector_stats')
           .select('week_start,sector_id,mention_count,positive_count,report_count,community_count')
+          .in('sector_id', US_SECTORS)
           .order('week_start', { ascending: true })
           .range(offset, offset + 999)
         if (!data || data.length === 0) break
@@ -110,6 +94,7 @@ export default function Backtest() {
         const { data } = await supabase
           .from('weekly_sector_returns')
           .select('week_start,sector_id,return_pct')
+          .in('sector_id', US_SECTORS)
           .order('week_start', { ascending: true })
           .range(offset, offset + 999)
         if (!data || data.length === 0) break
@@ -141,12 +126,42 @@ export default function Backtest() {
       }
       setBenchmarks(bMap)
 
+      // Load ticker-level weekly mention counts for rank signal scenario
+      const mentionFrom = new Date()
+      mentionFrom.setDate(mentionFrom.getDate() - 52 * 7 * 2)
+      const mentionFromStr = mentionFrom.toISOString().split('T')[0]
+      const allMentions: { ticker: string; mentioned_at: string }[] = []
+      let mOffset = 0
+      while (true) {
+        const { data: mData } = await supabase
+          .from('raw_mentions')
+          .select('ticker, mentioned_at')
+          .in('ticker', US_TICKERS)
+          .gte('mentioned_at', mentionFromStr)
+          .range(mOffset, mOffset + 999)
+        if (!mData || mData.length === 0) break
+        allMentions.push(...(mData as typeof allMentions))
+        if (mData.length < 1000) break
+        mOffset += 1000
+      }
+      const weekTicker: Record<string, Record<string, number>> = {}
+      allMentions.forEach(m => {
+        const d = new Date(m.mentioned_at)
+        const day = d.getDay()
+        const diff = day === 0 ? -6 : 1 - day
+        const mon = new Date(d)
+        mon.setDate(d.getDate() + diff)
+        const w = mon.toISOString().split('T')[0]
+        if (!weekTicker[w]) weekTicker[w] = {}
+        weekTicker[w][m.ticker] = (weekTicker[w][m.ticker] ?? 0) + 1
+      })
+      setTickerWeekly(weekTicker)
+
       setLoading(false)
     }
     load()
   }, [])
 
-  // ── 소스 필터 적용 → 주간 BacktestRow 생성 ─────────────────
   const rows = useMemo((): BacktestRow[] => {
     if (rawStats.length === 0 || rawReturns.length === 0) return []
 
@@ -196,7 +211,6 @@ export default function Backtest() {
     return result
   }, [rawStats, rawReturns, sourceFilter])
 
-  // ── 롤링 집계 ──────────────────────────────────────────────
   const rollingRows = useMemo(() => {
     if (rows.length === 0) return []
     const N = rollingWeeks
@@ -247,7 +261,6 @@ export default function Backtest() {
   const activeRows       = rollingRows
   const activeBenchmarks = benchmarks
 
-  // ── 매매 시뮬레이션 ─────────────────────────────────────────
   interface TradeLog { week: string; action: 'BUY' | 'SELL'; sectors: string[]; reason?: string }
   interface TradeSimResult {
     series:      { week: string; strat: number; kospi200: number | null; kosdaq150: number | null }[]
@@ -272,8 +285,108 @@ export default function Backtest() {
     setTradeSimRunning(true)
     setTradeSimResult(null)
     setTimeout(() => {
-      const allPeriodKeys = [...new Set(activeRows.map(r => String(r.week_start).slice(0, 10)))].sort()
       const annFactor = 52
+
+      // === RANK SIGNAL scenario: ticker-level rank from raw_mentions ===
+      if (tradeScenario === 'rank_signal') {
+        const qqqReturnMap: Record<string, number> = {}
+        for (const r of rawReturns) {
+          if (r.sector_id === 'NASDAQ_TOP10') {
+            qqqReturnMap[String(r.week_start).slice(0, 10)] = r.return_pct
+          }
+        }
+
+        const now = new Date()
+        const daysToMon = (now.getDay() + 6) % 7
+        const thisMon = new Date(now)
+        thisMon.setDate(now.getDate() - daysToMon)
+        thisMon.setHours(0, 0, 0, 0)
+        const thisMonStr = thisMon.toISOString().slice(0, 10)
+        const allTickerWeeks = Object.keys(tickerWeekly).filter(w => w < thisMonStr).sort()
+
+        let isRankHolding = false
+        let cumStrat = 100, cumKospi = 100, cumKosdaq = 100
+        let peak = 100, maxDD = 0
+        let holdWeeks = 0, cashWeeks = 0, wins = 0
+        let hasBenchKospi = false, hasBenchKosdaq = false
+        const series: TradeSimResult['series'] = []
+        const rankTradeLog: TradeLog[] = []
+
+        for (let i = 1; i < allTickerWeeks.length - 1; i++) {
+          const wKey     = allTickerWeeks[i]
+          const prevWKey = allTickerWeeks[i - 1]
+          const nextWKey = allTickerWeeks[i + 1]
+          const curCounts  = tickerWeekly[wKey]     ?? {}
+          const prevCounts = tickerWeekly[prevWKey] ?? {}
+
+          const sorted     = [...US_TICKERS].sort((a, b) => (curCounts[b]  ?? 0) - (curCounts[a]  ?? 0))
+          const prevSorted = [...US_TICKERS].sort((a, b) => (prevCounts[b] ?? 0) - (prevCounts[a] ?? 0))
+          const ranks: Record<string, number>     = {}
+          const prevRanks: Record<string, number> = {}
+          sorted.forEach((t, idx)     => { ranks[t]     = idx + 1 })
+          prevSorted.forEach((t, idx) => { prevRanks[t] = idx + 1 })
+
+          // Signal: any top-3 ticker's rank improved OR mention count grew
+          const signal = US_TICKERS.some(t =>
+            ranks[t] <= 3 && (ranks[t] < prevRanks[t] || (curCounts[t] ?? 0) > (prevCounts[t] ?? 0))
+          )
+
+          const nextReturn = qqqReturnMap[nextWKey] ?? 0
+          const bench = activeBenchmarks[nextWKey]
+
+          if (signal) {
+            if (!isRankHolding) {
+              rankTradeLog.push({ week: wKey, action: 'BUY', sectors: ['NASDAQ_TOP10'], reason: 'Top3 순위 상승/성장' })
+              isRankHolding = true
+            }
+            cumStrat *= (1 + nextReturn / 100)
+            holdWeeks++
+            if (nextReturn > 0) wins++
+          } else {
+            if (isRankHolding) {
+              rankTradeLog.push({ week: wKey, action: 'SELL', sectors: ['NASDAQ_TOP10'], reason: '순위 신호 소멸' })
+              isRankHolding = false
+            }
+            cashWeeks++
+          }
+
+          if (bench?.kospi200  != null) { cumKospi  *= (1 + bench.kospi200  / 100); hasBenchKospi  = true }
+          if (bench?.kosdaq150 != null) { cumKosdaq *= (1 + bench.kosdaq150 / 100); hasBenchKosdaq = true }
+          if (cumStrat > peak) peak = cumStrat
+          const dd = (peak - cumStrat) / peak * 100
+          if (dd > maxDD) maxDD = dd
+
+          series.push({
+            week:      wKey,
+            strat:     parseFloat(cumStrat.toFixed(2)),
+            kospi200:  bench?.kospi200  != null ? parseFloat(cumKospi.toFixed(2))  : null,
+            kosdaq150: bench?.kosdaq150 != null ? parseFloat(cumKosdaq.toFixed(2)) : null,
+          })
+        }
+
+        const nPeriods    = allTickerWeeks.length
+        const totalReturn = cumStrat - 100
+        const annReturn   = nPeriods > 0 ? (Math.pow(cumStrat / 100, annFactor / nPeriods) - 1) * 100 : 0
+
+        setTradeSimResult({
+          series, totalReturn, annReturn,
+          maxDrawdown: maxDD,
+          winRate:   holdWeeks > 0 ? wins / holdWeeks * 100 : 0,
+          nBuys:     rankTradeLog.filter(t => t.action === 'BUY').length,
+          nSells:    rankTradeLog.filter(t => t.action === 'SELL').length,
+          holdWeeks, cashWeeks,
+          benchKospi:  hasBenchKospi  ? cumKospi  - 100 : null,
+          benchKosdaq: hasBenchKosdaq ? cumKosdaq - 100 : null,
+          tradeLog:       rankTradeLog,
+          currentHolding: isRankHolding ? ['NASDAQ_TOP10'] : null,
+          currentWeek:    allTickerWeeks[allTickerWeeks.length - 1] ?? null,
+        })
+        setTradeSimRunning(false)
+        return
+      }
+      // === END RANK SIGNAL ===
+
+      const allPeriodKeys = [...new Set(activeRows.map(r => String(r.week_start).slice(0, 10)))].sort()
 
       let holdingArr: string[] = []
       let declines = 0
@@ -367,7 +480,6 @@ export default function Backtest() {
           }
 
         } else {
-          // 최적 복합
           if (isHolding) {
             const h = holdingArr[0] ?? null
             if (h !== null && top1Delta !== null && top1Delta !== h) {
@@ -434,9 +546,8 @@ export default function Backtest() {
       })
       setTradeSimRunning(false)
     }, 50)
-  }, [activeRows, activeBenchmarks, tradeScenario])
+  }, [activeRows, activeBenchmarks, tradeScenario, tickerWeekly, rawReturns])
 
-  // ── 전략 최적화 그리드 서치 ────────────────────────────────
   interface OptResult {
     label:       string
     topN:        number
@@ -570,166 +681,6 @@ export default function Backtest() {
     }, 50)
   }, [activeRows])
 
-  const searchStocks = useCallback(async (query: string) => {
-    if (query.trim().length < 1) { setStockResults([]); return }
-    setSearchLoading(true)
-    const { data } = await supabase
-      .from('stocks')
-      .select('ticker,name,sector_id')
-      .or(`name.ilike.%${query}%,ticker.ilike.%${query}%`)
-      .neq('sector_id', 'NASDAQ_TOP10')
-      .limit(10)
-    setStockResults((data as Stock[]) ?? [])
-    setSearchLoading(false)
-  }, [])
-
-  const runStockSim = useCallback(async () => {
-    if (!selectedStock) return
-    setStockSimLoading(true)
-    setStockSimResult(null)
-
-    // 1. 52주 언급량 집계
-    const now = new Date()
-    const from = new Date(now)
-    from.setDate(from.getDate() - 52 * 7)
-    const fromStr = from.toISOString().split('T')[0]
-
-    const { data: mentions } = await supabase
-      .from('raw_mentions')
-      .select('mentioned_at')
-      .eq('ticker', selectedStock.ticker)
-      .gte('mentioned_at', fromStr)
-      .not('source', 'in', '(dart,community)')
-
-    const weekMap: Record<string, number> = {}
-    mentions?.forEach(m => {
-      const d = new Date(m.mentioned_at)
-      const day = d.getDay()
-      const diff = day === 0 ? -6 : 1 - day
-      const mon = new Date(d)
-      mon.setDate(d.getDate() + diff)
-      const key = mon.toISOString().split('T')[0]
-      weekMap[key] = (weekMap[key] ?? 0) + 1
-    })
-
-    const weeks: string[] = []
-    for (let i = 51; i >= 0; i--) {
-      const d = new Date(now)
-      d.setDate(d.getDate() - i * 7)
-      const day = d.getDay()
-      const diff = day === 0 ? -6 : 1 - day
-      const mon = new Date(d)
-      mon.setDate(d.getDate() + diff)
-      weeks.push(mon.toISOString().split('T')[0])
-    }
-    const weeklyMentions = weeks.map(w => weekMap[w] ?? 0)
-
-    // 롤링 윈도우 기준으로 상승/하락/연속 계산
-    const rollingSlice = weeklyMentions.slice(-rollingWeeks)
-    const comparisons = rollingSlice.length - 1
-
-    let upWeeks = 0, downWeeks = 0
-    for (let i = 1; i < rollingSlice.length; i++) {
-      if (rollingSlice[i] > rollingSlice[i - 1]) upWeeks++
-      else if (rollingSlice[i] < rollingSlice[i - 1]) downWeeks++
-    }
-
-    let streak = 0
-    for (let i = rollingSlice.length - 1; i >= 1; i--) {
-      if (rollingSlice[i] > rollingSlice[i - 1]) {
-        if (streak >= 0) streak++
-        else break
-      } else if (rollingSlice[i] < rollingSlice[i - 1]) {
-        if (streak <= 0) streak--
-        else break
-      } else break
-    }
-
-    // 2. 연초 대비 섹터 수익률
-    const ytdStart = `${now.getFullYear()}-01-01`
-    const sectorRets = rawReturns.filter(
-      r => r.sector_id === selectedStock.sector_id && r.week_start >= ytdStart
-    )
-    const ytdMultiplier = sectorRets.reduce((acc, r) => acc * (1 + (r.return_pct ?? 0) / 100), 1)
-
-    // 3. 섹터 내 언급순위 (최근 2주)
-    const curWeekKey  = weeks[weeks.length - 1]
-    const prevWeekKey = weeks[weeks.length - 2]
-
-    const { data: sectorStocks } = await supabase
-      .from('stocks')
-      .select('ticker')
-      .eq('sector_id', selectedStock.sector_id)
-    const peerTickers = (sectorStocks ?? []).map((s: { ticker: string }) => s.ticker)
-
-    let mentionRank = 0, mentionRankPrev = 0
-    if (peerTickers.length > 0) {
-      const rangeEnd = new Date(curWeekKey)
-      rangeEnd.setDate(rangeEnd.getDate() + 7)
-      const { data: peerMentions } = await supabase
-        .from('raw_mentions')
-        .select('ticker, mentioned_at')
-        .in('ticker', peerTickers)
-        .gte('mentioned_at', prevWeekKey)
-        .lt('mentioned_at', rangeEnd.toISOString().split('T')[0])
-        .not('source', 'in', '(dart,community)')
-
-      const weekCounts: Record<string, Record<string, number>> = {}
-      ;(peerMentions ?? []).forEach((m: { ticker: string; mentioned_at: string }) => {
-        const d = new Date(m.mentioned_at)
-        const day = d.getDay()
-        const diff = day === 0 ? -6 : 1 - day
-        const mon = new Date(d)
-        mon.setDate(d.getDate() + diff)
-        const w = mon.toISOString().split('T')[0]
-        if (!weekCounts[w]) weekCounts[w] = {}
-        weekCounts[w][m.ticker] = (weekCounts[w][m.ticker] ?? 0) + 1
-      })
-
-      const rank = (wKey: string) => {
-        const counts = weekCounts[wKey] ?? {}
-        const sorted = [...peerTickers].sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0))
-        const idx = sorted.indexOf(selectedStock.ticker)
-        return idx >= 0 ? idx + 1 : peerTickers.length + 1
-      }
-      mentionRank     = rank(curWeekKey)
-      mentionRankPrev = rank(prevWeekKey)
-    }
-
-    const rankImproved = mentionRankPrev > 0 && mentionRank < mentionRankPrev
-    const inTop3       = mentionRank > 0 && mentionRank <= 3
-    const rankSignal   = rankImproved || inTop3
-
-    // 4. 복합 점수 (롤링 윈도우 기준, ≥50% → +2, ≥40% → +1)
-    const upRate = comparisons > 0 ? upWeeks / comparisons : 0
-    let score = 0
-    if (upRate >= 1 / 2) score += 2
-    else if (upRate >= 2 / 5) score += 1
-    if (streak >= 3) score += 2
-    else if (streak >= 2) score += 1
-    if (ytdMultiplier >= 1.1) score += 1
-    if (rankSignal) score += 1
-
-    setStockSimResult({
-      sectorId: selectedStock.sector_id,
-      sectorLabel: SECTOR_LABELS[selectedStock.sector_id] ?? selectedStock.sector_id,
-      weeklyMentions,
-      weekDates: weeks,
-      upWeeks,
-      downWeeks,
-      streak,
-      ytdMultiplier,
-      score,
-      recommend: score >= 3,
-      rollingWindow: rollingWeeks,
-      mentionRank,
-      mentionRankPrev,
-      sectorPeerCount: peerTickers.length,
-      rankSignal,
-    })
-    setStockSimLoading(false)
-  }, [selectedStock, rawReturns, rollingWeeks])
-
   if (loading) return <div className="loading">데이터 불러오는 중...</div>
 
   const green = '#3fb950', red = '#f85149', gray = '#8b949e'
@@ -737,7 +688,7 @@ export default function Backtest() {
   return (
     <div>
       <div className="page-header">
-        <div className="page-title">백테스트</div>
+        <div className="page-title">미국 백테스트</div>
         <div className="page-sub">매매 시뮬레이션 및 전략 최적화</div>
       </div>
 
@@ -786,7 +737,6 @@ export default function Backtest() {
 
       {/* 매매 시뮬레이션 */}
       <div className="card" style={{ marginBottom: 20 }}>
-        {/* 시나리오 선택 */}
         <div style={{ marginBottom: 12 }}>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
             <span style={{ fontSize: 12, color: '#6b7280' }}>시나리오:</span>
@@ -843,7 +793,7 @@ export default function Backtest() {
 
         {!tradeSimResult && !tradeSimRunning && (
           <div style={{ color: '#6b7280', fontSize: 13 }}>
-            버튼을 눌러 실제 매매 시뮬레이션을 시작합니다. <span style={{ color: '#8b949e' }}>(전체 기간 데이터 기준)</span>
+            버튼을 눌러 실제 매매 시뮬레이션을 시작합니다.
           </div>
         )}
 
@@ -892,7 +842,7 @@ export default function Backtest() {
                     ))}
                   </div>
                 ) : (
-                  <div style={{ fontSize: 13, color: '#f85149', fontWeight: 600 }}>● 현금 (2주 연속 언급 감소로 매도)</div>
+                  <div style={{ fontSize: 13, color: '#f85149', fontWeight: 600 }}>● 현금 (언급 감소로 매도)</div>
                 )}
               </div>
 
@@ -1073,302 +1023,6 @@ export default function Backtest() {
                   })}
                 </tbody>
               </table>
-            </div>
-          )
-        })()}
-      </div>
-
-      {/* 특정종목 시뮬레이션 */}
-      <div style={{ marginTop: 40, borderTop: '1px solid #21262d', paddingTop: 28 }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: '#e6edf3', marginBottom: 4 }}>특정종목 시뮬레이션</div>
-        <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 16 }}>
-          종목을 검색해 52주 언급량 트렌드와 섹터 수익률을 기반으로 추천 여부를 판단합니다.
-        </div>
-
-        {/* 검색창 */}
-        <div style={{ position: 'relative', maxWidth: 360 }}>
-          <input
-            type="text"
-            placeholder="종목명 또는 티커 검색 (예: 삼성전자, 005930)"
-            value={stockQuery}
-            onChange={e => {
-              setStockQuery(e.target.value)
-              searchStocks(e.target.value)
-            }}
-            style={{
-              width: '100%', boxSizing: 'border-box',
-              padding: '8px 12px', borderRadius: 8, fontSize: 13,
-              border: '1px solid #30363d', background: '#0d1117', color: '#e6edf3',
-              outline: 'none',
-            }}
-          />
-          {searchLoading && (
-            <span style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', color: '#6b7280', fontSize: 11 }}>
-              검색 중...
-            </span>
-          )}
-          {stockResults.length > 0 && (
-            <div style={{
-              position: 'absolute', top: '110%', left: 0, right: 0, zIndex: 100,
-              background: '#161b22', border: '1px solid #30363d', borderRadius: 8,
-              overflow: 'hidden',
-            }}>
-              {stockResults.map(s => (
-                <div
-                  key={s.ticker}
-                  onClick={() => {
-                    setSelectedStock(s)
-                    setStockQuery(s.name)
-                    setStockResults([])
-                    setStockSimResult(null)
-                  }}
-                  style={{
-                    padding: '8px 14px', cursor: 'pointer', fontSize: 13,
-                    color: '#e6edf3', borderBottom: '1px solid #21262d',
-                    display: 'flex', gap: 10, alignItems: 'center',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.background = '#1c2128')}
-                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                >
-                  <span style={{ color: '#a78bfa', fontWeight: 600 }}>{s.ticker}</span>
-                  <span>{s.name}</span>
-                  <span style={{ marginLeft: 'auto', fontSize: 11, color: '#6b7280' }}>
-                    {SECTOR_LABELS[s.sector_id] ?? s.sector_id}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* 선택된 종목 + 실행 버튼 */}
-        {selectedStock && (
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 12 }}>
-            <span style={{
-              padding: '4px 12px', borderRadius: 20, background: '#1c2128',
-              border: '1px solid #30363d', fontSize: 12, color: '#c9d1d9',
-            }}>
-              {selectedStock.name} ({selectedStock.ticker}) · {SECTOR_LABELS[selectedStock.sector_id] ?? selectedStock.sector_id}
-            </span>
-            <button
-              onClick={runStockSim}
-              disabled={stockSimLoading}
-              style={{
-                padding: '6px 18px', borderRadius: 8, fontSize: 13, fontWeight: 600,
-                cursor: stockSimLoading ? 'not-allowed' : 'pointer',
-                border: '1px solid #a78bfa',
-                background: stockSimLoading ? '#1c2128' : '#a78bfa22',
-                color: stockSimLoading ? '#6b7280' : '#a78bfa',
-              }}
-            >
-              {stockSimLoading ? '분석 중...' : '시뮬레이션 실행'}
-            </button>
-          </div>
-        )}
-
-        {/* 결과 카드 */}
-        {stockSimResult && (() => {
-          const r = stockSimResult
-          const streakLabel = r.streak === 0
-            ? '보합'
-            : r.streak > 0
-              ? `${r.streak}주 연속 상승 중`
-              : `${Math.abs(r.streak)}주 연속 하락 중`
-          const streakColor = r.streak > 0 ? green : r.streak < 0 ? red : gray
-          const ytdPct = ((r.ytdMultiplier - 1) * 100).toFixed(1)
-          const ytdColor = r.ytdMultiplier >= 1 ? green : red
-          const comparisons = r.rollingWindow - 1
-          const upRate = comparisons > 0 ? r.upWeeks / comparisons : 0
-          const scoreItems = [
-            {
-              label: `상승 비율 ≥ 50% (${r.rollingWindow}주 롤링)`,
-              desc: `실제 ${(upRate * 100).toFixed(1)}% (${r.upWeeks}/${comparisons}번)`,
-              pts: upRate >= 1 / 2 ? 2 : 0,
-              max: 2,
-              met: upRate >= 1 / 2,
-            },
-            {
-              label: `상승 비율 ≥ 40% (${r.rollingWindow}주 롤링)`,
-              desc: `실제 ${(upRate * 100).toFixed(1)}% (${r.upWeeks}/${comparisons}번)`,
-              pts: upRate >= 2 / 5 && upRate < 1 / 2 ? 1 : 0,
-              max: 1,
-              met: upRate >= 2 / 5,
-            },
-            {
-              label: `연속 상승 ≥ 3주 (${r.rollingWindow}주 롤링)`,
-              desc: `실제 ${r.streak > 0 ? r.streak : 0}주 연속`,
-              pts: r.streak >= 3 ? 2 : 0,
-              max: 2,
-              met: r.streak >= 3,
-            },
-            {
-              label: `연속 상승 ≥ 2주 (${r.rollingWindow}주 롤링)`,
-              desc: `실제 ${r.streak > 0 ? r.streak : 0}주 연속`,
-              pts: r.streak >= 2 && r.streak < 3 ? 1 : 0,
-              max: 1,
-              met: r.streak >= 2,
-            },
-            {
-              label: '연초 대비 섹터 ≥ 1.10배',
-              desc: `실제 ${r.ytdMultiplier.toFixed(2)}배`,
-              pts: r.ytdMultiplier >= 1.1 ? 1 : 0,
-              max: 1,
-              met: r.ytdMultiplier >= 1.1,
-            },
-            {
-              label: '언급순위 상승 또는 Top3',
-              desc: r.sectorPeerCount > 0
-                ? `섹터 내 현재 ${r.mentionRank}위 / 전주 ${r.mentionRankPrev}위 (${r.sectorPeerCount}개 종목)`
-                : '섹터 동종목 데이터 없음',
-              pts: r.rankSignal ? 1 : 0,
-              max: 1,
-              met: r.rankSignal,
-            },
-          ]
-          return (
-            <div style={{
-              marginTop: 20, borderRadius: 12,
-              border: '1px solid #21262d', background: '#0d1117',
-              display: 'flex', gap: 0,
-            }}>
-              {/* 좌: 차트 + 지표 + 결론 */}
-              <div style={{ flex: 1, padding: '20px 24px', minWidth: 0 }}>
-                {/* 헤더 */}
-                <div style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 16, fontWeight: 700, color: '#e6edf3' }}>
-                    {selectedStock!.name}
-                    <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 8 }}>({selectedStock!.ticker})</span>
-                  </div>
-                  <div style={{ fontSize: 12, color: '#a78bfa', marginTop: 3 }}>
-                    섹터: {r.sectorLabel}
-                  </div>
-                </div>
-
-                {/* 52주 언급량 바 차트 */}
-                <div style={{ marginBottom: 16 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                    <span style={{ fontSize: 12, color: '#6b7280' }}>52주 언급량 추이 (차트)</span>
-                    <span style={{ fontSize: 12 }}>
-                      <span style={{ color: '#6b7280', fontSize: 11 }}>{r.rollingWindow}주 롤링 기준 · </span>
-                      <span style={{ color: green }}>{r.upWeeks}주 상승</span>
-                      <span style={{ color: '#6b7280' }}> / </span>
-                      <span style={{ color: red }}>{r.downWeeks}주 하락</span>
-                      <span style={{ color: '#6b7280', marginLeft: 6 }}>· 연속: </span>
-                      <span style={{ color: streakColor, fontWeight: 600 }}>{streakLabel}</span>
-                    </span>
-                  </div>
-                  {(() => {
-                    const chartData = r.weeklyMentions.map((count, i) => {
-                      const prev = i === 0 ? count : r.weeklyMentions[i - 1]
-                      const dir = i === 0 ? 'flat' : count > prev ? 'up' : count < prev ? 'down' : 'flat'
-                      const label = r.weekDates[i].slice(5).replace('-', '/')
-                      return { label, count, dir }
-                    })
-                    const maxCount = Math.max(...chartData.map(d => d.count), 1)
-                    return (
-                      <ResponsiveContainer width="100%" height={130}>
-                        <BarChart data={chartData} margin={{ top: 4, right: 4, left: -24, bottom: 0 }}
-                          barCategoryGap="20%">
-                          <CartesianGrid vertical={false} stroke="#21262d" />
-                          <XAxis dataKey="label" tick={{ fontSize: 9, fill: '#6b7280' }} axisLine={false} tickLine={false} interval={7} />
-                          <YAxis tick={{ fontSize: 10, fill: '#6b7280' }} axisLine={false} tickLine={false} domain={[0, maxCount]} />
-                          <Tooltip
-                            cursor={{ fill: '#ffffff08' }}
-                            contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 6, fontSize: 12 }}
-                            labelStyle={{ color: '#6b7280' }}
-                            formatter={(value, _name, entry) => {
-                              const dir = (entry as { payload: { dir: string } }).payload.dir
-                              const arrow = dir === 'up' ? '▲' : dir === 'down' ? '▼' : '─'
-                              return [`${value ?? 0}건 ${arrow}`, '언급량']
-                            }}
-                          />
-                          <Bar dataKey="count" radius={[3, 3, 0, 0]}>
-                            {chartData.map((d, i) => (
-                              <Cell
-                                key={i}
-                                fill={d.dir === 'up' ? '#3fb950' : d.dir === 'down' ? '#f85149' : '#4b5563'}
-                              />
-                            ))}
-                          </Bar>
-                        </BarChart>
-                      </ResponsiveContainer>
-                    )
-                  })()}
-                </div>
-
-                {/* 지표 */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13, borderTop: '1px solid #21262d', paddingTop: 12 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#6b7280' }}>연초 대비 섹터 수익률</span>
-                    <span style={{ color: ytdColor, fontWeight: 600 }}>
-                      {r.ytdMultiplier.toFixed(2)}배 ({ytdPct}%)
-                    </span>
-                  </div>
-                </div>
-
-                {/* 결론 */}
-                <div style={{
-                  marginTop: 18, padding: '14px 18px', borderRadius: 10,
-                  background: r.recommend ? '#064e3b' : '#450a0a',
-                  border: `1px solid ${r.recommend ? '#34d399' : '#f87171'}`,
-                  display: 'flex', alignItems: 'center', gap: 10,
-                }}>
-                  <span style={{ fontSize: 22 }}>{r.recommend ? '✅' : '❌'}</span>
-                  <div>
-                    <div style={{ fontSize: 15, fontWeight: 700, color: r.recommend ? green : red }}>
-                      {r.recommend ? '추천합니다' : '추천하지 않습니다'}
-                    </div>
-                    <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
-                      {r.recommend
-                        ? `복합 기준 3점 이상 충족 (${r.score}/6점)`
-                        : `복합 기준 3점 미달 (${r.score}/6점)`}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* 우: 점수 선정기준 */}
-              <div style={{
-                width: 220, flexShrink: 0,
-                borderLeft: '1px solid #21262d',
-                padding: '20px 18px',
-                display: 'flex', flexDirection: 'column', gap: 0,
-              }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: '#6b7280', marginBottom: 12 }}>점수 선정기준</div>
-                {scoreItems.map((item, i) => (
-                  <div key={i} style={{
-                    padding: '8px 0',
-                    borderBottom: i < scoreItems.length - 1 ? '1px solid #161b22' : 'none',
-                    opacity: item.met ? 1 : 0.45,
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
-                      <span style={{ fontSize: 11, color: item.met ? '#e6edf3' : '#6b7280' }}>{item.label}</span>
-                      <span style={{
-                        fontSize: 11, fontWeight: 700,
-                        color: item.pts > 0 ? green : '#4b5563',
-                      }}>
-                        {item.pts > 0 ? `+${item.pts}점` : `0/${item.max}점`}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: 10, color: '#6b7280' }}>{item.desc}</div>
-                  </div>
-                ))}
-                <div style={{
-                  marginTop: 14, paddingTop: 12, borderTop: '1px solid #21262d',
-                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                }}>
-                  <span style={{ fontSize: 12, color: '#6b7280' }}>합계</span>
-                  <span style={{
-                    fontSize: 14, fontWeight: 700,
-                    color: r.score >= 3 ? green : red,
-                  }}>
-                    {r.score} / 6점
-                  </span>
-                </div>
-                <div style={{ marginTop: 6, fontSize: 10, color: '#4b5563', textAlign: 'right' }}>
-                  3점 이상 → 추천
-                </div>
-              </div>
             </div>
           )
         })()}
