@@ -33,10 +33,17 @@ export default function SectorDetail() {
   useEffect(() => {
     setLoading(true)
     async function load() {
-      // 기간 from 계산
+      // 기간 from 계산 — 이번 주(미완성) 월요일 기준으로 N주 전 월요일
+      const thisMonday = (() => {
+        const d = new Date()
+        const daysToMonday = (d.getDay() + 6) % 7   // 0=Mon … 6=Sun
+        d.setDate(d.getDate() - daysToMonday)
+        d.setHours(0, 0, 0, 0)
+        return d
+      })()
       const fromStr = weeks === 0
         ? '2018-01-01'
-        : (() => { const d = new Date(); d.setDate(d.getDate() - weeks * 7); return d.toISOString().split('T')[0] })()
+        : (() => { const d = new Date(thisMonday); d.setDate(d.getDate() - weeks * 7); return d.toISOString().split('T')[0] })()
 
       // weekly_sector_stats 에서 해당 섹터 주간 데이터
       const { data: wStats } = await supabase
@@ -116,8 +123,8 @@ export default function SectorDetail() {
   }, [sector, weeks])
 
   const color = SECTOR_COLORS[sector] ?? '#6b7280'
-  const periodLabel = ({ 0: '전체', 13: '3개월', 26: '6개월', 52: '1년', 104: '2년', 208: '4년' } as Record<number, string>)[weeks] ?? `${weeks}주`
-  const xAxisInterval = weeks === 0 ? 16 : weeks <= 13 ? 0 : weeks <= 26 ? 1 : weeks <= 52 ? 2 : weeks <= 104 ? 3 : 7
+  const periodLabel = ({ 0: '전체', 1: '1주', 2: '2주', 3: '3주', 13: '3개월', 26: '6개월', 52: '1년', 104: '2년', 208: '4년' } as Record<number, string>)[weeks] ?? `${weeks}주`
+  const xAxisInterval = weeks === 0 ? 16 : weeks <= 3 ? 0 : weeks <= 13 ? 0 : weeks <= 26 ? 1 : weeks <= 52 ? 2 : weeks <= 104 ? 3 : 7
   const rolling13Avg = weekRows.length > 0
     ? Math.round(weekRows.slice(-13).reduce((s, r) => s + r.mention_count, 0) / Math.min(weekRows.length, 13))
     : null
@@ -141,6 +148,9 @@ export default function SectorDetail() {
         <label style={{ marginLeft: 8 }}>기간</label>
         <div className="btn-group">
           {([
+            { w: 1,   label: '1주'   },
+            { w: 2,   label: '2주'   },
+            { w: 3,   label: '3주'   },
             { w: 13,  label: '3개월' },
             { w: 26,  label: '6개월' },
             { w: 52,  label: '1년'   },

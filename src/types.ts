@@ -62,6 +62,31 @@ export const SECTOR_COLORS: Record<string, string> = {
   ETC:           '#4B5563',
 }
 
+// 섹터별 대표 ETF (ticker: KRX 종목코드 또는 US 티커)
+export const SECTOR_ETF: Record<string, { ticker: string; name: string }> = {
+  SEMICONDUCTOR: { ticker: '091160', name: 'KODEX 반도체' },
+  BATTERY:       { ticker: '305720', name: 'KODEX 2차전지산업' },
+  BIOTECH:       { ticker: '244580', name: 'KODEX 바이오' },
+  AUTO:          { ticker: '091180', name: 'KODEX 자동차' },
+  STEEL:         { ticker: '139230', name: 'TIGER 200 중공업' },
+  FINANCE:       { ticker: '139270', name: 'TIGER 200 금융' },
+  CHEMICAL:      { ticker: '139220', name: 'KODEX 화학' },
+  IT:            { ticker: '266360', name: 'KODEX IT' },
+  CONSTRUCTION:  { ticker: '139240', name: 'KODEX 건설' },
+  SHIPBUILDING:  { ticker: '466920', name: 'SOL 조선TOP3플러스' },
+  DEFENSE:       { ticker: '449450', name: 'PLUS K방산' },
+  HEALTH:        { ticker: '143860', name: 'TIGER 헬스케어' },
+  GAME:          { ticker: '300950', name: 'KODEX 게임산업' },
+  COSMETIC:      { ticker: '228790', name: 'TIGER 화장품' },
+  ENERGY:        { ticker: '139250', name: 'TIGER 200 에너지화학' },
+  INDUSTRIAL:    { ticker: '227550', name: 'TIGER 200 산업재' },
+  FOOD:          { ticker: '227560', name: 'TIGER 200 생활소비재' },
+  RETAIL:        { ticker: '139290', name: 'TIGER 200 경기소비재' },
+  CONSUMER:      { ticker: '266410', name: 'KODEX 필수소비재' },
+  NASDAQ_TOP10:  { ticker: 'QQQ',    name: 'Invesco QQQ' },
+  // TELECOM, PLATFORM, LOGISTICS, MATERIAL — 신뢰할 코드 미확인
+}
+
 export const SECTOR_LABELS: Record<string, string> = {
   SEMICONDUCTOR: '반도체',
   BATTERY:       '이차전지',
@@ -106,6 +131,34 @@ export interface BacktestRow {
   mention_count: number
   positive_count: number
   next_week_return: number | null
+}
+
+// ── 시뮬레이션 공용 타입 ────────────────────────────────────
+
+export type TradeScenario = 'top1_count' | 'top1_delta' | 'top1_rate' | 'top1_composite'
+export type SourceFilter  = 'all' | 'report' | 'community'
+
+export interface RawStat {
+  week_start:      string
+  sector_id:       string
+  mention_count:   number
+  positive_count:  number
+  report_count:    number
+  community_count: number
+}
+
+export interface UserStrategy {
+  id:            string
+  user_id:       string
+  name:          string
+  scenario:      TradeScenario
+  rolling_weeks: number
+  confirm_weeks: number
+  source_filter: SourceFilter
+  sim_from_date: string | null
+  is_active:     boolean
+  created_at:    string
+  updated_at:    string
 }
 
 export function getCurrentWeekStart(): string {

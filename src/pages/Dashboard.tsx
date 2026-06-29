@@ -21,6 +21,9 @@ export default function Dashboard() {
   const [rows, setRows]           = useState<SectorRow[]>([])
   const [weekStart, setWeekStart] = useState('')
   const [prevWeek, setPrevWeek]   = useState('')
+  const [cmp3m, setCmp3m]         = useState<Record<string, number>>({})
+  const [cmp6m, setCmp6m]         = useState<Record<string, number>>({})
+  const [cmp1y, setCmp1y]         = useState<Record<string, number>>({})
   const [sourceData, setSourceData] = useState<{ name: string; value: number }[]>([])
   const [totalMentions, setTotalMentions] = useState(0)
   const [loading, setLoading]     = useState(true)
@@ -36,7 +39,7 @@ export default function Dashboard() {
         .from('weekly_sector_stats')
         .select('week_start')
         .order('week_start', { ascending: false })
-        .limit(100)
+        .limit(2000)
 
       if (!weeksRaw || weeksRaw.length === 0) { setLoading(false); return }
 
@@ -58,20 +61,47 @@ export default function Dashboard() {
       setWeekStart(cur)
       if (prev) setPrevWeek(prev)
 
-      // 이번 주 + 전주 섹터 통계 한 번에 조회
+      // DB에서 직접 비교 주차 조회 (가장 가까운 이전 주)
+      const getClosestWeek = async (monthsAgo: number): Promise<string | null> => {
+        const target = new Date(cur)
+        target.setMonth(target.getMonth() - monthsAgo)
+        const targetStr = target.toISOString().slice(0, 10)
+        const { data } = await supabase
+          .from('weekly_sector_stats')
+          .select('week_start')
+          .lte('week_start', targetStr)
+          .order('week_start', { ascending: false })
+          .limit(1)
+        return (data?.[0]?.week_start as string | undefined)?.slice(0, 10) ?? null
+      }
+      const [w3m, w6m, w1y] = await Promise.all([
+        getClosestWeek(3),
+        getClosestWeek(6),
+        getClosestWeek(12),
+      ])
+
+      // 현재 + 비교 주차 모두 조회
+      const weeksToLoad = [cur, prev, w3m, w6m, w1y].filter(Boolean) as string[]
       const { data: stats } = await supabase
         .from('weekly_sector_stats')
         .select('week_start, sector_id, mention_count, community_count, rank')
-        .in('week_start', prev ? [cur, prev] : [cur])
+        .in('week_start', weeksToLoad)
         .not('sector_id', 'in', `(${US_SECTORS.join(',')})`)
 
       const curMap: Record<string, SectorStat> = {}
       const prevMap: Record<string, number>    = {}
+      const map3m:   Record<string, number>    = {}
+      const map6m:   Record<string, number>    = {}
+      const map1y:   Record<string, number>    = {}
 
       stats?.forEach(r => {
+        const w = (r.week_start as string).slice(0, 10)
         const cnt = (r.mention_count as number) - ((r.community_count as number) ?? 0)
-        if (r.week_start === cur)  curMap[r.sector_id]  = { ...r, mention_count: cnt } as unknown as SectorStat
-        if (r.week_start === prev) prevMap[r.sector_id] = cnt
+        if (w === cur)  curMap[r.sector_id]  = { ...r, mention_count: cnt } as unknown as SectorStat
+        if (w === prev) prevMap[r.sector_id] = cnt
+        if (w === w3m)  map3m[r.sector_id]  = cnt
+        if (w === w6m)  map6m[r.sector_id]  = cnt
+        if (w === w1y)  map1y[r.sector_id]  = cnt
       })
 
       const combined: SectorRow[] = Object.values(curMap).map(r => ({
@@ -84,6 +114,9 @@ export default function Dashboard() {
       })
 
       setRows(combined)
+      setCmp3m(map3m)
+      setCmp6m(map6m)
+      setCmp1y(map1y)
       setTotalMentions(combined.reduce((s, r) => s + r.mention_count, 0))
 
       // 소스 분포 (이번 주 기준)
@@ -162,6 +195,25 @@ export default function Dashboard() {
 
   return (
     <div>
+      <div style={{
+        background: 'linear-gradient(135deg, #2d0a0a 0%, #161b22 100%)',
+        border: '1px solid #f85149',
+        borderRadius: 12,
+        padding: '20px 28px',
+        marginBottom: 24,
+      }}>
+        <div style={{ fontSize: 18, fontWeight: 700, color: '#e6edf3', marginBottom: 8, letterSpacing: '-0.3px' }}>
+          오르는 놈이 계속 오른다 — 모멘텀 기반 섹터 투자
+        </div>
+        <div style={{ fontSize: 13.5, color: '#8b949e', lineHeight: 1.75 }}>
+          빈익빈 부익부, 시장의 관심이 집중된 곳에 돈이 몰린다는 원리를 활용합니다.<br />
+          FOMO를 역으로 이용해, <span style={{ color: '#ff7b72' }}>기관 리서치 언급량이 급증하는 섹터</span>를 자동으로 포착하고<br />
+          다음 주 매수 방향을 추천해드립니다.
+        </div>
+        <div style={{ marginTop: 12, fontSize: 12, color: '#8b949e', borderTop: '1px solid #3d1111', paddingTop: 10 }}>
+          ⚠️ 투자에 대한 책임은 본인에게 있습니다. 이 페이지는 정보 제공 목적이며 투자 권유가 아닙니다.
+        </div>
+      </div>
       <div className="page-header">
         <div className="page-title">섹터 대시보드</div>
         <div className="page-sub">
@@ -202,8 +254,9 @@ export default function Dashboard() {
                   <th style={{ textAlign: 'left', paddingBottom: 6 }}>섹터</th>
                   <th style={{ paddingBottom: 6 }}></th>
                   <th style={{ textAlign: 'right', paddingBottom: 6 }}>언급량</th>
-                  <th style={{ textAlign: 'right', paddingBottom: 6 }}>전주대비</th>
-                  <th style={{ textAlign: 'right', paddingBottom: 6 }}>비율</th>
+                  <th style={{ textAlign: 'right', paddingBottom: 6 }}>3개월전</th>
+                  <th style={{ textAlign: 'right', paddingBottom: 6 }}>6개월전</th>
+                  <th style={{ textAlign: 'right', paddingBottom: 6 }}>1년전</th>
                 </tr>
               </thead>
               <tbody>
@@ -211,7 +264,6 @@ export default function Dashboard() {
                   const color = SECTOR_COLORS[r.sector_id] ?? '#6b7280'
                   const label = SECTOR_LABELS[r.sector_id] ?? r.sector_id
                   const barPct = (r.mention_count / maxCount) * 100
-                  const sharePct = totalMentions > 0 ? ((r.mention_count / totalMentions) * 100).toFixed(1) : '0'
                   return (
                     <tr key={r.sector_id} onClick={() => navigate(`/sector?sector=${r.sector_id}`)}
                       style={{ cursor: 'pointer', borderBottom: '1px solid #21262d' }}
@@ -228,11 +280,16 @@ export default function Dashboard() {
                         </div>
                       </td>
                       <td style={{ textAlign: 'right', fontWeight: 700, color: '#58a6ff', padding: '5px 4px' }}>{r.mention_count}</td>
-                      <td style={{ textAlign: 'right', fontWeight: 600, padding: '5px 4px',
-                        color: r.delta == null ? '#8b949e' : r.delta > 0 ? '#10B981' : r.delta < 0 ? '#EF4444' : '#8b949e' }}>
-                        {r.delta == null ? '-' : r.delta > 0 ? `+${r.delta}` : r.delta === 0 ? '─' : r.delta}
-                      </td>
-                      <td style={{ textAlign: 'right', color: '#8b949e', padding: '5px 4px' }}>{sharePct}%</td>
+                      {[cmp3m, cmp6m, cmp1y].map((cmp, ci) => {
+                        const past = cmp[r.sector_id]
+                        const d = past != null ? r.mention_count - past : null
+                        return (
+                          <td key={ci} style={{ textAlign: 'right', fontWeight: 600, padding: '5px 4px',
+                            color: d == null ? '#4b5563' : d > 0 ? '#10B981' : d < 0 ? '#EF4444' : '#8b949e' }}>
+                            {d == null ? '-' : d > 0 ? `+${d}` : d === 0 ? '─' : d}
+                          </td>
+                        )
+                      })}
                     </tr>
                   )
                 })}
